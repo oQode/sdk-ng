@@ -1,0 +1,175 @@
+# Zephyr SDK with libstdc++ posix gthreads: arm-zephyr-eabi for linux-x86_64
+
+name: cpp_gthreads
+
+on:
+  push:
+    tags:
+    - 'cpp_gthreads-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TARGET: arm-zephyr-eabi
+  HOST: linux-x86_64
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y autoconf automake bison flex gawk gettext help2man \
+                                libncurses-dev libtool-bin meson ninja-build python3-dev \
+                                rsync texinfo unzip wget xz-utils
+
+        WORKSPACE="${RUNNER_TEMP}/workspace"
+        mkdir -p ${WORKSPACE}/sources
+        echo "WORKSPACE=${WORKSPACE}" >> $GITHUB_ENV
+
+    - name: Check out source code
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Check out submodules
+      run: |
+        git submodule init
+        git submodule update --depth=1 --recursive crosstool-ng
+        git submodule update --depth=1 --recursive binutils
+        git submodule update --depth=1 --recursive gdb
+        git submodule update --depth=1 --recursive gcc
+        git submodule update --depth=1 --recursive picolibc
+
+    - name: Set version information
+      run: |
+        VERSION=$(<VERSION)
+        if [ "${GITHUB_REF_TYPE}" == "tag" ]; then
+          BUILD_NAME="${GITHUB_REF_NAME}"
+        else
+          BUILD_NAME="cpp_gthreads-${VERSION}-g${GITHUB_SHA::7}"
+        fi
+
+        echo "VERSION=${VERSION}" >> $GITHUB_ENV
+        echo "BUILD_NAME=${BUILD_NAME}" >> $GITHUB_ENV
+        echo "BUNDLE_DIR=zephyr-sdk-${BUILD_NAME}" >> $GITHUB_ENV
+
+    # picolibc_headers in crosstool-ng copies the whole include directory into the sysroot
+    - name: Install pthread.h stub
+      run: |
+        cp stubs/pthread.h picolibc/newlib/libc/include/
+
+    - name: Build crosstool-ng
+      run: |
+        pushd crosstool-ng
+        ./bootstrap
+        popd
+
+        mkdir -p ${WORKSPACE}/crosstool-ng-build
+        pushd ${WORKSPACE}/crosstool-ng-build
+        ${GITHUB_WORKSPACE}/crosstool-ng/configure --prefix=${WORKSPACE}/crosstool-ng
+        make
+        make install
+        popd
+        rm -rf ${WORKSPACE}/crosstool-ng-build
+
+        echo "CT_NG=${WORKSPACE}/crosstool-ng/bin/ct-ng" >> $GITHUB_ENV
+
+    - name: Restore source files
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/workspace/sources
+        key: ct-sources-${{ hashFiles('configs/common.config', 'configs/arm-zephyr-eabi.config', '.gitmodules') }}
+        restore-keys: ct-sources-
+
+    - name: Build toolchain
+      run: |
+        export CT_PREFIX="${WORKSPACE}/output"
+
+        mkdir -p ${WORKSPACE}/build
+        pushd ${WORKSPACE}/build
+
+        cat ${GITHUB_WORKSPACE}/configs/common.config \
+            ${GITHUB_WORKSPACE}/configs/${TARGET}.config \
+            > .config
+
+        cat <<EOF >> .config
+        CT_SHOW_CT_VERSION=n
+        CT_TOOLCHAIN_PKGVERSION="Zephyr SDK ${VERSION} ${BUILD_NAME}"
+        CT_TOOLCHAIN_BUGURL="https://github.com/${GITHUB_REPOSITORY}/issues"
+        CT_LOCAL_TARBALLS_DIR="${WORKSPACE}/sources"
+        CT_OVERLAY_LOCATION="${GITHUB_WORKSPACE}/overlays"
+        CT_LOG_PROGRESS_BAR=n
+        CT_LOG_EXTRA=y
+        CT_LOG_LEVEL_MAX="EXTRA"
+        CT_GDB_CROSS_PYTHON=y
+        CT_GDB_CROSS_PYTHON_VARIANT=y
+        CT_GDB_CROSS_PYTHON_BINARY="python3.12"
+        EOF
+
+        ${CT_NG} savedefconfig DEFCONFIG=build.config
+        ${CT_NG} distclean
+        ${CT_NG} defconfig DEFCONFIG=build.config
+        ${CT_NG} build
+        popd
+
+        chmod -R u+w ${WORKSPACE}/output
+        rm -f ${WORKSPACE}/output/${TARGET}/build.log.bz2
+
+    - name: Check toolchain
+      run: |
+        scripts/check_cpp_gthreads.sh ${WORKSPACE}/output/${TARGET}
+
+    - name: Create SDK bundle
+      run: |
+        mkdir -p ${BUNDLE_DIR}/gnu
+        echo "${VERSION}" > ${BUNDLE_DIR}/sdk_version
+        echo "${TARGET}" > ${BUNDLE_DIR}/sdk_gnu_toolchains
+        cp ncs_version ${BUNDLE_DIR}/ncs_version
+        cp -a cmake ${BUNDLE_DIR}/
+        mv ${WORKSPACE}/output/${TARGET} ${BUNDLE_DIR}/gnu/
+
+        ARCHIVE_FILE=${BUNDLE_DIR}_${HOST}.tar.xz
+        XZ_OPT="-T0" tar -Jcf ${ARCHIVE_FILE} --owner=0 --group=0 ${BUNDLE_DIR}
+        sha256sum ${ARCHIVE_FILE} > sha256.sum
+
+        echo "ARCHIVE_FILE=${ARCHIVE_FILE}" >> $GITHUB_ENV
+
+    - name: Upload toolchain build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: log_${{ env.TARGET }}
+        path: ${{ runner.temp }}/workspace/build/build.log
+
+    - name: Upload SDK bundle
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.BUNDLE_DIR }}_${{ env.HOST }}
+        path: |
+          ${{ env.ARCHIVE_FILE }}
+          sha256.sum
+
+    - name: Publish release
+      if: github.ref_type == 'tag'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "${GITHUB_REF_NAME}" ${ARCHIVE_FILE} sha256.sum \
+          --title "${GITHUB_REF_NAME}" \
+          --notes "Zephyr SDK ${VERSION} (${TARGET}, ${HOST}) with libstdc++ posix gthreads for NCS $(<ncs_version)."
