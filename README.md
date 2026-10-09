@@ -57,12 +57,18 @@ Upstream поддержку один раз включил (`--enable-threads=c1
    `_GLIBCXX_GTHREAD_USE_WEAK 1`, и `__gthread_active_p()` проверяет weak-ссылку на `pthread_cancel`: если она
    не слинкована, `std::mutex`, guard'ы статических переменных и `shared_ptr` молча работают без блокировок.
    С `_GLIBCXX_GTHREAD_USE_WEAK 0` `__gthread_active_p()` всегда 1, а отсутствие pthread — ошибка линковки.
+6. **Список multilib** (`gcc/config/arm/t-m4f-m33f`, `--with-multilib-list=@t-m4f-m33f`). Из `rmprofile` оставлены
+   только `thumb/v7e-m+fp/hard` (Cortex-M4F, nRF52840) и `thumb/v8-m.main+fp/hard` (Cortex-M33F, nRF54L15) и их
+   `space`: 6 вариантов вместо 68, сборка укладывается в лимит job GitHub. Имена каталогов и сопоставление опций
+   как в `rmprofile`. Другие ядра и soft-float (`CONFIG_FPU=n`) молча получают multilib по умолчанию (ARM-режим,
+   soft-float), то есть не поддерживаются.
 
 Сгенерированный `configure` правится вручную синхронно с `.ac`/`.m4` (autoconf 2.69 не нужен).
 
 ## Изменения в этом репозитории
 
-1. `configs/arm-zephyr-eabi.config`, `CT_CC_GCC_EXTRA_CONFIG_ARRAY` — опции из `common.config` и:
+1. `configs/arm-zephyr-eabi.config`: `CT_CC_GCC_MULTILIB_LIST="@t-m4f-m33f"` (патч 6) и
+   `CT_CC_GCC_EXTRA_CONFIG_ARRAY` — опции из `common.config` и:
    - `--enable-threads=posix` (crosstool-ng для bare-metal ставит `--enable-threads=no`, пользовательские опции
      идут после и перекрывают);
    - `--disable-libstdcxx-dual-abi --with-default-libstdcxx-abi=new` (без COW-строк, см. ниже);
@@ -90,6 +96,7 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 5. `scripts/check_cpp_gthreads.sh <gnu/arm-zephyr-eabi>` — проверки после сборки в CI, для
    `thumb/v7e-m+fp/hard`, `thumb/v8-m.main+fp/hard` и их `space`:
    - `arm-zephyr-eabi-gcc -v` → `Thread model: posix`;
+   - Cortex-M4F и Cortex-M33F с `-O2`/`-Os` выбирают ожидаемый каталог multilib;
    - компиляция `<mutex>`: есть `_GLIBCXX_HAS_GTHREADS`, `_GLIBCXX_HAVE_TLS`, `_GLIBCXX_USE_CLOCK_MONOTONIC`,
      `_GLIBCXX_USE_NANOSLEEP`; `_GLIBCXX_USE_DUAL_ABI` и `_GLIBCXX_GTHREAD_USE_WEAK` — 0; нет
      `__GTHREAD_MUTEX_INIT` и `_GLIBCXX_USE_PTHREAD_RWLOCK_T`; у `std::mutex` есть деструктор;
@@ -150,8 +157,7 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 
 ## Риски
 
-- Сборка всех multilib `rmprofile` на GitHub runner (4 ядра, лимит job 6 часов) может не уложиться;
-  тогда сократить multilib или перейти на self-hosted runner.
+- Новое ядро (другой SoC, `CONFIG_FPU=n`) требует добавить его в `t-m4f-m33f` и пересобрать SDK.
 
 ## Ссылки
 

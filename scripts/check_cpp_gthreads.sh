@@ -47,12 +47,14 @@ cat > "${TEST_CC}" <<'EOF'
 static_assert(!std::is_trivially_destructible_v<std::mutex>, "std::mutex has no destructor");
 EOF
 
-for CPU in "-mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16" \
-           "-mcpu=cortex-m33 -mfloat-abi=hard -mfpu=fpv5-sp-d16"; do
-  for OPT in "-O2" "-Os"; do
-    FLAGS="-mthumb ${CPU} ${OPT}"
+for CPU in "-mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16;thumb/v7e-m+fp/hard" \
+           "-mcpu=cortex-m33 -mfloat-abi=hard -mfpu=fpv5-sp-d16;thumb/v8-m.main+fp/hard"; do
+  for OPT in "-O2;" "-Os;/space"; do
+    FLAGS="${CPU%;*} ${OPT%;*}"
+    EXPECTED="${CPU#*;}${OPT#*;}"
     DIR=$(${BIN}-g++ ${FLAGS} -print-multi-directory)
     echo "Checking ${DIR}"
+    [ "${DIR}" == "${EXPECTED}" ] || fail "${FLAGS}: multilib ${DIR}, expected ${EXPECTED}"
 
     ${BIN}-g++ ${FLAGS} -std=c++17 -fsyntax-only "${TEST_CC}" 2>&1 | grep 'error:' | sed "s|^|FAIL: ${DIR}: |"
     [ "${PIPESTATUS[0]}" == "0" ] || FAILED=1
