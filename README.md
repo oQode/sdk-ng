@@ -5,7 +5,8 @@
 Цель — тулчейн `arm-zephyr-eabi` для Linux x86_64, в котором libstdc++ собрана с моделью потоков `posix`
 и TLS, без аварийного пула исключений и с исключениями в `-Os`-варианте библиотек.
 
-Статус: патчи и изменения сделаны, тулчейн ещё не собирался.
+Статус: тулчейн собран в CI (artifact `cpp_gthreads-1.0.1-gcabb14e`, релиза нет). Прошивка на nRF52840 (NCS 3.4.1)
+запускается после патча Zephyr из «Что нужно приложению»; проверки из «Проверка на прошивке» ещё не пройдены.
 
 ## Зачем
 
@@ -138,6 +139,13 @@ libstdc++.
 ## Что нужно приложению
 
 - `ZEPHYR_SDK_INSTALL_DIR` указывает на этот SDK (окружение NCS по умолчанию указывает на встроенный).
+- Zephyr с [zephyr@c665aaba050](https://github.com/zephyrproject-rtos/zephyr/commit/c665aaba050)
+  ([zephyr#111547](https://github.com/zephyrproject-rtos/zephyr/pull/111547)): `pthread_cond_broadcast()` должен
+  принимать condvar с `PTHREAD_COND_INITIALIZER`, ни разу не использованную. Без него он возвращает `EINVAL`
+  (`get_posix_cond()` вместо `to_posix_cond()`), `__gnu_cxx::__cond::broadcast()` бросает
+  `__concurrence_broadcast_error` из `noexcept` `__cxa_guard_release`, и первая же инициализация function-local
+  static заканчивается `std::terminate`. В NCS 3.4.1 и раньше коммита нет, его надо наложить на
+  `lib/posix/options/cond.c` (одна строка), в `sdk-zephyr` main он уже есть.
 - `CONFIG_POSIX_API=y`, `CONFIG_THREAD_LOCAL_STORAGE=y`; для `std::thread` — `CONFIG_DYNAMIC_THREAD=y`.
   Без `CONFIG_POSIX_THREADS` C++-приложение, которое тянет guard'ы, локали или `std::mutex`, не слинкуется.
 - Пулы POSIX с запасом под libstdc++: +1 рекурсивный мьютекс и +1 condvar для guard'ов статических переменных.
@@ -161,11 +169,17 @@ libstdc++.
 
 1. Перенести `cpp_gthreads` обоих форков на тег sdk-ng, который требует новая NCS.
 2. Сверить `stubs/pthread.h` с Zephyr новой NCS.
-3. Обновить `ncs_version`, поставить тег, дождаться CI, повторить проверки.
+3. Проверить, есть ли в Zephyr новой NCS zephyr@c665aaba050; если есть, патч больше не нужен.
+4. Обновить `ncs_version`, поставить тег, дождаться CI, повторить проверки.
 
 ## Риски
 
 - Новое ядро (другой SoC, `CONFIG_FPU=n`) требует добавить его в `t-m4f-m33f` и пересобрать SDK.
+- `to_posix_cond()` в Zephyr выделяет слот пула для `PTHREAD_COND_INITIALIZER` без блокировки
+  ([zephyr#121708](https://github.com/zephyrproject-rtos/zephyr/pull/121708), открыт): при первом одновременном
+  обращении двух потоков слот теряется, ожидающий поток может не проснуться. Guard'ов это не касается, libstdc++
+  вызывает для них `wait` и `broadcast` под своим статическим мьютексом. `std::condition_variable` касается:
+  `notify_*` обычно вызывают без мьютекса.
 
 ## Ссылки
 
@@ -174,3 +188,5 @@ libstdc++.
 - [sdk-ng#735](https://github.com/zephyrproject-rtos/sdk-ng/pull/735), [#751](https://github.com/zephyrproject-rtos/sdk-ng/issues/751), [#753](https://github.com/zephyrproject-rtos/sdk-ng/pull/753), [#774](https://github.com/zephyrproject-rtos/sdk-ng/pull/774) — C11 threads и откат
 - [sdk-ng#1142](https://github.com/zephyrproject-rtos/sdk-ng/pull/1142) — `--enable-threads=posix`
 - [gcc#30](https://github.com/zephyrproject-rtos/gcc/pull/30) — откат C11 gthreads в форке GCC
+- [zephyr#111547](https://github.com/zephyrproject-rtos/zephyr/pull/111547) — `pthread_cond_broadcast` со статической condvar
+- [zephyr#121708](https://github.com/zephyrproject-rtos/zephyr/pull/121708) — гонка ленивой инициализации condvar
