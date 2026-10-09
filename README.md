@@ -5,7 +5,7 @@
 Цель — тулчейн `arm-zephyr-eabi` для Linux x86_64, в котором libstdc++ собрана с моделью потоков `posix`
 и TLS, без COW-строк, без аварийного пула исключений и с исключениями в `-Os`-варианте библиотек.
 
-Статус: патчи в `oQode/gcc` сделаны, изменения в этом репозитории — нет.
+Статус: патчи и изменения сделаны, тулчейн ещё не собирался.
 
 ## Зачем
 
@@ -53,34 +53,50 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 4. **Время** (`libstdc++-v3/acinclude.m4`, `configure`). `--enable-libstdcxx-time=yes` решает по link-тестам,
    а они не проходят: `clock_gettime`, `nanosleep`, `sched_yield` реализует Zephyr, а не picolibc. В режиме `auto`
    для `*-zephyr-*` они заданы явно, `steady_clock` идёт в `clock_gettime(CLOCK_MONOTONIC)`, `sleep_for` — в `nanosleep`.
+5. **Сильные ссылки на pthread** (`libstdc++-v3/config/os/newlib/os_defines.h`). По умолчанию
+   `_GLIBCXX_GTHREAD_USE_WEAK 1`, и `__gthread_active_p()` проверяет weak-ссылку на `pthread_cancel`: если она
+   не слинкована, `std::mutex`, guard'ы статических переменных и `shared_ptr` молча работают без блокировок.
+   С `_GLIBCXX_GTHREAD_USE_WEAK 0` `__gthread_active_p()` всегда 1, а отсутствие pthread — ошибка линковки.
 
 Сгенерированный `configure` правится вручную синхронно с `.ac`/`.m4` (autoconf 2.69 не нужен).
 
 ## Изменения в этом репозитории
 
-1. `configs/common.config`, `CT_CC_GCC_EXTRA_CONFIG_ARRAY` += 
-   - `--enable-threads=posix`;
+1. `configs/arm-zephyr-eabi.config`, `CT_CC_GCC_EXTRA_CONFIG_ARRAY` — опции из `common.config` и:
+   - `--enable-threads=posix` (crosstool-ng для bare-metal ставит `--enable-threads=no`, пользовательские опции
+     идут после и перекрывают);
    - `--disable-libstdcxx-dual-abi --with-default-libstdcxx-abi=new` (без COW-строк, см. ниже);
    - `--enable-libstdcxx-static-eh-pool --with-libstdcxx-eh-pool-obj-count=0` (без аварийного пула, см. ниже).
-2. `stubs/pthread.h` — только объявления, строго по типам Zephyr из той версии NCS, под которую собирается SDK
-   (`include/zephyr/posix/posix_types.h`, `pthread.h`): `pthread_mutex_t`, `pthread_cond_t`, `pthread_key_t`,
-   `pthread_t` — `uint32_t`; `pthread_once_t` — `struct { bool flag; }`, `PTHREAD_ONCE_INIT {0}`;
-   `PTHREAD_MUTEX_INITIALIZER (-1)`, `PTHREAD_COND_INITIALIZER (-1)`, `PTHREAD_MUTEX_RECURSIVE 1`;
-   `pthread_attr_t`, `sched_param` как в Zephyr; функции — только реализованные в `lib/posix/options`.
-   Заглушка из sdk-ng#1142 не подходит: её `{0}`-инициализаторы Zephyr считает невалидным объектом (`EINVAL`).
-   В шапке — версия NCS, из которой заголовок сгенерирован.
-3. CI: матрица хост `linux-x86_64` × цель `arm-zephyr-eabi`; шаг копирования `stubs/pthread.h` в
-   `picolibc/newlib/libc/include/`. На тег `cpp_gthreads-1.0.1-N` — релиз с полным
-   деревом SDK (`sdk_version`, `cmake/`, `gnu/arm-zephyr-eabi`) и файлом-маркером с версией NCS.
+
+   Не в `common.config`: TLS в патче GCC включён только для `arm*-zephyr-*`, другая цель с этими опциями получила бы
+   потоки без TLS.
+2. `stubs/pthread.h` — типы и инициализаторы копией из Zephyr версии NCS в `ncs_version`
+   (`include/zephyr/posix/posix_types.h`, `pthread.h`): они компилируются в `libstdc++.a` и должны совпадать с ABI
+   Zephyr. Функции — только те, что использует `gthr-posix.h` и реализует `lib/posix/options`.
+   - В сборке Zephyr используется настоящий заголовок: напрямую, если `CONFIG_POSIX_SYSTEM_INTERFACES` ставит
+     `include/zephyr/posix` первым в путь, иначе через `__has_include(<zephyr/posix/pthread.h>)` в заглушке.
+   - Read-write lock объявлены только для C (нужны C-части `gthr-posix.h`). В C++ их нет, configure libstdc++ не
+     находит `pthread_rwlock_t`, и `std::shared_mutex` собирается на condvar: вариант на `pthread_rwlock_t` берёт
+     `PTHREAD_RWLOCK_INITIALIZER` без `pthread_rwlock_destroy` и терял бы слот пула, как `std::mutex` без патча 1.
+   - Заглушка из sdk-ng#1142 не подходит: её `{0}`-инициализаторы Zephyr считает невалидным объектом (`EINVAL`).
+   - crosstool-ng (`picolibc_headers`) копирует весь `picolibc/newlib/libc/include/` в sysroot, поэтому CI кладёт
+     заглушку туда до сборки.
+3. `ncs_version` — версия NCS, под которую собран SDK; попадает в SDK файлом-маркером `ncs_version`.
+4. `.github/workflows/cpp_gthreads.yml` вместо upstream `ci.yml`, `release.yml`, `twister.yml` (им нужны
+   self-hosted runner'ы и секреты Zephyr). Хост `linux-x86_64` на `ubuntu-24.04`, цель `arm-zephyr-eabi`.
+   Запуск вручную (`workflow_dispatch`) — artifact; тег `cpp_gthreads-1.0.1-N` — ещё и GitHub release.
+   SDK: `sdk_version`, `sdk_gnu_toolchains`, `ncs_version`, `cmake/`, `gnu/arm-zephyr-eabi`, без host tools.
    `sdk_version` остаётся `1.0.1`, иначе `find_package(Zephyr-sdk 1.0)` в Zephyr не найдёт SDK.
-4. Проверки в CI, сборка падает при несовпадении:
+5. `scripts/check_cpp_gthreads.sh <gnu/arm-zephyr-eabi>` — проверки после сборки в CI, для
+   `thumb/v7e-m+fp/hard`, `thumb/v8-m.main+fp/hard` и их `space`:
    - `arm-zephyr-eabi-gcc -v` → `Thread model: posix`;
-   - `c++config.h` для `thumb/v7e-m+fp/hard` и `thumb/v7e-m+fp/hard/space`: есть `_GLIBCXX_HAS_GTHREADS`,
-     `_GLIBCXX_HAVE_TLS`, `_GLIBCXX_USE_CLOCK_MONOTONIC`, `_GLIBCXX_USE_NANOSLEEP`, `_GLIBCXX_USE_DUAL_ABI 0`,
-     `_GLIBCXX_GTHREAD_USE_WEAK 0`;
-   - в `bits/gthr-default.h` нет `__GTHREAD_MUTEX_INIT`;
-   - `functexcept.o` из `space`-варианта `libstdc++.a` вызывает `__cxa_throw`, а не `abort`;
-   - в `libstdc++.a` нет `cow-string-inst.o` и символа `emergency_pool`.
+   - компиляция `<mutex>`: есть `_GLIBCXX_HAS_GTHREADS`, `_GLIBCXX_HAVE_TLS`, `_GLIBCXX_USE_CLOCK_MONOTONIC`,
+     `_GLIBCXX_USE_NANOSLEEP`; `_GLIBCXX_USE_DUAL_ABI` и `_GLIBCXX_GTHREAD_USE_WEAK` — 0; нет
+     `__GTHREAD_MUTEX_INIT` и `_GLIBCXX_USE_PTHREAD_RWLOCK_T`; у `std::mutex` есть деструктор;
+   - `libstdc++.a`: нет `cow-string-inst.o`, символов COW `std::string` (`_ZNSs`) и `emergency_pool`;
+     `functexcept.o` вызывает `__cxa_throw`, `guard.o` — `pthread_once`, в `eh_globals.o` есть TLS-символ.
+
+   На SDK 1.0.1 скрипт проходит только `functexcept.o` без `-Os`.
 
 ## COW-строки
 
@@ -108,6 +124,7 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 
 - `ZEPHYR_SDK_INSTALL_DIR` указывает на этот SDK (окружение NCS по умолчанию указывает на встроенный).
 - `CONFIG_POSIX_API=y`, `CONFIG_THREAD_LOCAL_STORAGE=y`; для `std::thread` — `CONFIG_DYNAMIC_THREAD=y`.
+  Без `CONFIG_POSIX_THREADS` C++-приложение, которое тянет guard'ы, локали или `std::mutex`, не слинкуется.
 - Пулы POSIX с запасом под libstdc++: +1 рекурсивный мьютекс и +1 condvar для guard'ов статических переменных.
   Пулы инициализируются на `PRE_KERNEL_1`, статические конструкторы C++ — после `POST_KERNEL`,
   так что глобальные `std::mutex` создаются корректно.
@@ -128,12 +145,13 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 ## При обновлении NCS
 
 1. Перенести `cpp_gthreads` обоих форков на тег sdk-ng, который требует новая NCS.
-2. Перегенерировать `stubs/pthread.h` из Zephyr новой NCS.
-3. Обновить версию NCS в маркере, поставить тег, дождаться CI, повторить проверки.
+2. Сверить `stubs/pthread.h` с Zephyr новой NCS.
+3. Обновить `ncs_version`, поставить тег, дождаться CI, повторить проверки.
 
 ## Риски
 
-- Сборка всех multilib `rmprofile` в CI — несколько часов; при упоре в лимит сократить до `v7e-m+fp/hard`.
+- Сборка всех multilib `rmprofile` на GitHub runner (4 ядра, лимит job 6 часов) может не уложиться;
+  тогда сократить multilib или перейти на self-hosted runner.
 
 ## Ссылки
 
