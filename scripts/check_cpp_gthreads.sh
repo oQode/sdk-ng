@@ -32,8 +32,8 @@ cat > "${TEST_CC}" <<'EOF'
 #ifndef _GLIBCXX_USE_NANOSLEEP
 #error "_GLIBCXX_USE_NANOSLEEP is not defined"
 #endif
-#if _GLIBCXX_USE_DUAL_ABI
-#error "_GLIBCXX_USE_DUAL_ABI is not 0"
+#if !_GLIBCXX_USE_CXX11_ABI
+#error "_GLIBCXX_USE_CXX11_ABI is not 1"
 #endif
 #if _GLIBCXX_GTHREAD_USE_WEAK
 #error "_GLIBCXX_GTHREAD_USE_WEAK is not 0"
@@ -60,8 +60,6 @@ for CPU in "-mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16;thumb/v7e-m+fp/ha
     [ "${PIPESTATUS[0]}" == "0" ] || FAILED=1
 
     LIB=$(${BIN}-g++ ${FLAGS} -print-file-name=libstdc++.a)
-    ${BIN}-ar t "${LIB}" | grep -q '^cow-string-inst\.o$' && fail "${DIR}: cow-string-inst.o in libstdc++.a"
-    ${BIN}-nm --defined-only "${LIB}" 2>/dev/null | grep -q ' _ZNSs' && fail "${DIR}: COW std::string symbols in libstdc++.a"
     ${BIN}-nm -A "${LIB}" 2>/dev/null | grep -q '^[^:]*:eh_alloc\.o:.*emergency_pool' && fail "${DIR}: emergency_pool in eh_alloc.o"
     ${BIN}-nm -A "${LIB}" 2>/dev/null | grep -q '^[^:]*:functexcept\.o: *U __cxa_throw$' || fail "${DIR}: functexcept.o does not call __cxa_throw"
     ${BIN}-nm -A "${LIB}" 2>/dev/null | grep -q '^[^:]*:guard\.o: *U pthread_once$' || fail "${DIR}: guard.o does not call pthread_once"

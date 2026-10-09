@@ -3,7 +3,7 @@
 Форк [zephyrproject-rtos/sdk-ng](https://github.com/zephyrproject-rtos/sdk-ng) от тега `v1.0.1`.
 Описание исходного SDK — в [README upstream](https://github.com/zephyrproject-rtos/sdk-ng/blob/v1.0.1/README.md).
 Цель — тулчейн `arm-zephyr-eabi` для Linux x86_64, в котором libstdc++ собрана с моделью потоков `posix`
-и TLS, без COW-строк, без аварийного пула исключений и с исключениями в `-Os`-варианте библиотек.
+и TLS, без аварийного пула исключений и с исключениями в `-Os`-варианте библиотек.
 
 Статус: патчи и изменения сделаны, тулчейн ещё не собирался.
 
@@ -53,6 +53,8 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 4. **Время** (`libstdc++-v3/acinclude.m4`, `configure`). `--enable-libstdcxx-time=yes` решает по link-тестам,
    а они не проходят: `clock_gettime`, `nanosleep`, `sched_yield` реализует Zephyr, а не picolibc. В режиме `auto`
    для `*-zephyr-*` они заданы явно, `steady_clock` идёт в `clock_gettime(CLOCK_MONOTONIC)`, `sleep_for` — в `nanosleep`.
+   picolibc объявляет `CLOCK_MONOTONIC` только при `_POSIX_MONOTONIC_CLOCK`, поэтому libstdc++ собирается с ним
+   (см. `CT_CC_GCC_ENABLE_CXX_FLAGS` ниже).
 5. **Сильные ссылки на pthread** (`libstdc++-v3/config/os/newlib/os_defines.h`). По умолчанию
    `_GLIBCXX_GTHREAD_USE_WEAK 1`, и `__gthread_active_p()` проверяет weak-ссылку на `pthread_cancel`: если она
    не слинкована, `std::mutex`, guard'ы статических переменных и `shared_ptr` молча работают без блокировок.
@@ -67,11 +69,13 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 
 ## Изменения в этом репозитории
 
-1. `configs/arm-zephyr-eabi.config`: `CT_CC_GCC_MULTILIB_LIST="@t-m4f-m33f"` (патч 6) и
-   `CT_CC_GCC_EXTRA_CONFIG_ARRAY` — опции из `common.config` и:
+1. `configs/arm-zephyr-eabi.config`:
+   - `CT_CC_GCC_MULTILIB_LIST="@t-m4f-m33f"` (патч 6);
+   - `CT_CC_GCC_ENABLE_CXX_FLAGS="-D_POSIX_MONOTONIC_CLOCK=200112L"` — только для компиляции libstdc++ (патч 4),
+     в установленные заголовки не попадает; значение `CLOCK_MONOTONIC` (4) совпадает с Zephyr;
+   - `CT_CC_GCC_EXTRA_CONFIG_ARRAY` — опции из `common.config` и:
    - `--enable-threads=posix` (crosstool-ng для bare-metal ставит `--enable-threads=no`, пользовательские опции
      идут после и перекрывают);
-   - `--disable-libstdcxx-dual-abi --with-default-libstdcxx-abi=new` (без COW-строк, см. ниже);
    - `--enable-libstdcxx-static-eh-pool --with-libstdcxx-eh-pool-obj-count=0` (без аварийного пула, см. ниже).
 
    Не в `common.config`: TLS в патче GCC включён только для `arm*-zephyr-*`, другая цель с этими опциями получила бы
@@ -98,19 +102,23 @@ Upstream поддержку один раз включил (`--enable-threads=c1
    - `arm-zephyr-eabi-gcc -v` → `Thread model: posix`;
    - Cortex-M4F и Cortex-M33F с `-O2`/`-Os` выбирают ожидаемый каталог multilib;
    - компиляция `<mutex>`: есть `_GLIBCXX_HAS_GTHREADS`, `_GLIBCXX_HAVE_TLS`, `_GLIBCXX_USE_CLOCK_MONOTONIC`,
-     `_GLIBCXX_USE_NANOSLEEP`; `_GLIBCXX_USE_DUAL_ABI` и `_GLIBCXX_GTHREAD_USE_WEAK` — 0; нет
+     `_GLIBCXX_USE_NANOSLEEP`; `_GLIBCXX_USE_CXX11_ABI` — 1, `_GLIBCXX_GTHREAD_USE_WEAK` — 0; нет
      `__GTHREAD_MUTEX_INIT` и `_GLIBCXX_USE_PTHREAD_RWLOCK_T`; у `std::mutex` есть деструктор;
-   - `libstdc++.a`: нет `cow-string-inst.o`, символов COW `std::string` (`_ZNSs`) и `emergency_pool`;
+   - `libstdc++.a`: нет `emergency_pool`;
      `functexcept.o` вызывает `__cxa_throw`, `guard.o` — `pthread_once`, в `eh_globals.o` есть TLS-символ.
 
    На SDK 1.0.1 скрипт проходит только `functexcept.o` без `-Os`.
 
 ## COW-строки
 
-При dual ABI в `std::runtime_error` и других исключениях хранится `__cow_string`, поэтому в прошивку попадают обе
-реализации строк: `cow-string-inst.o` (~5,3 КБ) и обычная `string-inst.o` (~5,2 КБ), плюс `cow-stdexcept.o` (~2,4 КБ).
-Без dual ABI `__cow_string` — это `basic_string<char>` (`include/std/stdexcept`), COW-объекты не собираются.
-Ожидаемая экономия −5…7 КБ ROM. Цена: `sizeof(std::runtime_error)` растёт с 8 до 28 Б.
+Остаются, dual ABI включён, как в SDK 1.0.1. В `std::runtime_error` и других исключениях хранится `__cow_string`,
+поэтому в прошивку попадают обе реализации строк: `cow-string-inst.o` (~5,3 КБ) и обычная `string-inst.o`
+(~5,2 КБ), плюс `cow-stdexcept.o` (~2,4 КБ).
+
+Убрать их опциями нельзя: `--disable-libstdcxx-dual-abi` в GCC 14 оставляет только старый ABI
+(`default_libstdcxx_abi="gcc4-compatible"`, `--with-default-libstdcxx-abi` игнорируется), то есть COW-строки
+везде. Сборка «только новый ABI» upstream не поддерживается и потребовала бы патчей configure и исходников
+libstdc++.
 
 ## Аварийный пул исключений
 
@@ -141,9 +149,9 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 
 ## Проверка на прошивке
 
-- Release с LTO: в map нет `cow-*.o`, `emergency_pool`, `_GLOBAL__sub_I__ZN9__gnu_cxx9__freeresEv`;
+- Release с LTO: в map нет `emergency_pool`, `_GLOBAL__sub_I__ZN9__gnu_cxx9__freeresEv`;
   `eh_globals` в `.tbss`; `__cxa_guard_acquire` вызывает `pthread_once`/`pthread_mutex_lock`.
-  Ожидание: потоки +2–3 КБ ROM, COW −5…7 КБ, `-Os` вместо `-O2` для библиотеки — ещё минус несколько КБ,
+  Ожидание: потоки +2–3 КБ ROM, `-Os` вместо `-O2` для библиотеки — ещё минус несколько КБ,
   куча +1088 Б свободно.
 - На железе: throw/catch в потоках main, workqueue и BT RX без terminate; параллельная инициализация
   function-local static из нескольких потоков; `steady_clock` и `sleep_for` не прыгают после `clock_settime`;
