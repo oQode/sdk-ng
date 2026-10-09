@@ -5,7 +5,7 @@
 Цель — тулчейн `arm-zephyr-eabi` для Linux x86_64, в котором libstdc++ собрана с моделью потоков `posix`
 и TLS, без COW-строк, без аварийного пула исключений и с исключениями в `-Os`-варианте библиотек.
 
-Статус: план, ничего из него ещё не сделано.
+Статус: патчи в `oQode/gcc` сделаны, изменения в этом репозитории — нет.
 
 ## Зачем
 
@@ -45,16 +45,21 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 2. **`-Os` с исключениями** (`config-ml.in`). Для `@Os`-multilib сейчас добавляется
    `-fno-exceptions -fno-asynchronous-unwind-tables`; убрать `-fno-exceptions`. Тогда библиотека, которую драйвер
    выбирает по `-Os` на строке линковки, бросает исключения, а не вызывает `abort()`.
-3. **TLS.** Нужен `_GLIBCXX_HAVE_TLS`, иначе `eh_globals` хранятся в `pthread_key`, а Zephyr `pthread_setspecific`
-   в потоках, созданных не через `pthread_create` (main, workqueue, BT RX), возвращает `EINVAL`,
-   и libsupc++ вызывает `std::terminate`. Сначала `gcc_cv_have_tls=yes` в окружении CI,
-   если не доходит до configure target-библиотек — правка сгенерированного `libstdc++-v3/configure`.
+3. **TLS** (`libstdc++-v3/configure.ac`, `configure`). Нужен `_GLIBCXX_HAVE_TLS`, иначе `eh_globals` хранятся
+   в `pthread_key`, а Zephyr `pthread_setspecific` в потоках, созданных не через `pthread_create` (main, workqueue,
+   BT RX), возвращает `EINVAL`, и libsupc++ вызывает `std::terminate`. SDK собирается с `--with-newlib`, в этой ветке
+   configure не вызывает `GCC_CHECK_TLS`, поэтому `gcc_cv_have_tls` не помогает: `HAVE_TLS` задаётся для
+   `arm*-zephyr-*` рядом с `*-rtems*`.
+4. **Время** (`libstdc++-v3/acinclude.m4`, `configure`). `--enable-libstdcxx-time=yes` решает по link-тестам,
+   а они не проходят: `clock_gettime`, `nanosleep`, `sched_yield` реализует Zephyr, а не picolibc. В режиме `auto`
+   для `*-zephyr-*` они заданы явно, `steady_clock` идёт в `clock_gettime(CLOCK_MONOTONIC)`, `sleep_for` — в `nanosleep`.
+
+Сгенерированный `configure` правится вручную синхронно с `.ac`/`.m4` (autoconf 2.69 не нужен).
 
 ## Изменения в этом репозитории
 
 1. `configs/common.config`, `CT_CC_GCC_EXTRA_CONFIG_ARRAY` += 
    - `--enable-threads=posix`;
-   - `--enable-libstdcxx-time=yes` (`steady_clock` через `clock_gettime(CLOCK_MONOTONIC)`, `sleep_for` через `nanosleep`);
    - `--disable-libstdcxx-dual-abi --with-default-libstdcxx-abi=new` (без COW-строк, см. ниже);
    - `--enable-libstdcxx-static-eh-pool --with-libstdcxx-eh-pool-obj-count=0` (без аварийного пула, см. ниже).
 2. `stubs/pthread.h` — только объявления, строго по типам Zephyr из той версии NCS, под которую собирается SDK
@@ -65,7 +70,7 @@ Upstream поддержку один раз включил (`--enable-threads=c1
    Заглушка из sdk-ng#1142 не подходит: её `{0}`-инициализаторы Zephyr считает невалидным объектом (`EINVAL`).
    В шапке — версия NCS, из которой заголовок сгенерирован.
 3. CI: матрица хост `linux-x86_64` × цель `arm-zephyr-eabi`; шаг копирования `stubs/pthread.h` в
-   `picolibc/newlib/libc/include/` и `export gcc_cv_have_tls=yes`. На тег `cpp_gthreads-1.0.1-N` — релиз с полным
+   `picolibc/newlib/libc/include/`. На тег `cpp_gthreads-1.0.1-N` — релиз с полным
    деревом SDK (`sdk_version`, `cmake/`, `gnu/arm-zephyr-eabi`) и файлом-маркером с версией NCS.
    `sdk_version` остаётся `1.0.1`, иначе `find_package(Zephyr-sdk 1.0)` в Zephyr не найдёт SDK.
 4. Проверки в CI, сборка падает при несовпадении:
@@ -129,8 +134,6 @@ Upstream поддержку один раз включил (`--enable-threads=c1
 ## Риски
 
 - Сборка всех multilib `rmprofile` в CI — несколько часов; при упоре в лимит сократить до `v7e-m+fp/hard`.
-- `--enable-libstdcxx-time=yes` может не пройти link-тесты на bare-metal; тогда `_GLIBCXX_USE_*` задаются
-  cache-переменными configure.
 
 ## Ссылки
 
